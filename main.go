@@ -385,13 +385,13 @@ func NewServer(kratosPublicEndpointPort, hydraPublicEndpointPort int) (*server, 
 	conf.HTTPClient = &http.Client{Jar: cj}
 	return &server{
 		KratosAPIClient:      kratos.NewAPIClient(conf),
-		KratosPublicEndpoint: fmt.Sprintf("http://localhost:%d", kratosPublicEndpointPort),
+		KratosPublicEndpoint: fmt.Sprintf("http://127.0.0.1:%d", kratosPublicEndpointPort),
 		HydraAPIClient: hydra.NewHTTPClientWithConfig(strfmt.Default, &hydra.TransportConfig{
 			BasePath: "/",
 			Host:     fmt.Sprintf("hydra:%d", hydraPublicEndpointPort),
 			Schemes:  []string{"http"},
 		}),
-		HydraPublicEndpoint: fmt.Sprintf("http://localhost:%d", hydraPublicEndpointPort),
+		HydraPublicEndpoint: fmt.Sprintf("http://127.0.0.1:%d", hydraPublicEndpointPort),
 		Port:                ":4455",
 	}, nil
 }
