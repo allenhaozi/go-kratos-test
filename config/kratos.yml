@@ -88,4 +88,4 @@ identity:
 
 courier:
   smtp:
-    connection_uri: smtps://test:test@mailslurper:1025/?skip_ssl_verify=true
+    connection_uri: smtps://:@172.27.70.16:32329/?skip_ssl_verify=true

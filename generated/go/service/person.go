@@ -9,6 +9,8 @@ type PersonSchemaJsonTraits struct {
 	// Email corresponds to the JSON schema field "email".
 	Email string `json:"email" yaml:"email"`
 
+	UserName string `json:"username"`
+
 	// Name corresponds to the JSON schema field "name".
 	Name *PersonSchemaJsonTraitsName `json:"name,omitempty" yaml:"name,omitempty"`
 }

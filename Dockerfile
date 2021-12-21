@@ -1,18 +1,15 @@
-FROM golang:alpine
+FROM docker.4pd.io/alpine:3.15.0
 
-RUN apk add --no-cache git bash && \
-  sed -i 's/bin\/ash/bin\/bash/g' /etc/passwd
+WORKDIR /
 
-# wait-for-it service is installed to wait for postgres service to start
-ADD https://raw.githubusercontent.com/vishnubob/wait-for-it/master/wait-for-it.sh /usr/local/bin
+# This is required by daemon connnecting with cri
+RUN apk add --no-cache ca-certificates bash tzdata \
+	&& cp /usr/share/zoneinfo/Hongkong /etc/localtime
 
-RUN chmod 755 /usr/local/bin/wait-for-it.sh && \
-  # Get reflex for watching changes in all files
-  go install github.com/cespare/reflex@latest
+COPY iam-web /usr/local/bin/iam-web
 
-WORKDIR /src
-COPY . /src
+COPY templates /templates
 
-EXPOSE 4455
+EXPOSE 8080
 
-CMD wait-for-it.sh -t 30 auth-db:5432 -- sh -c "reflex -sr '(\.go$|go\.mod|\.html$)' go run main.go"
+CMD [ "iam-web" ]
