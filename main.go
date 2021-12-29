@@ -12,12 +12,15 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
-	"github.com/atreya2011/kratos-test/generated/go/service"
+	openapiclient "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 	hydra "github.com/ory/hydra-client-go/client"
 	hydra_admin "github.com/ory/hydra-client-go/client/admin"
+	"github.com/ory/hydra-client-go/client/public"
 	hydra_models "github.com/ory/hydra-client-go/models"
 	kratos "github.com/ory/kratos-client-go"
 	log "github.com/sirupsen/logrus"
@@ -39,9 +42,20 @@ type templateData struct {
 type server struct {
 	KratosAPIClient      *kratos.APIClient
 	KratosPublicEndpoint string
-	HydraAPIClient       *hydra.OryHydra
+	HydraAdminClient     *hydra.OryHydra
+	HydraPublicClient    *hydra.OryHydra
 	HydraPublicEndpoint  string
 	Port                 string
+}
+
+func init() {
+	log.SetLevel(log.DebugLevel)
+
+	log.SetOutput(os.Stdout)
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp: true,
+	})
+
 }
 
 func main() {
@@ -56,12 +70,7 @@ func main() {
 	http.HandleFunc("/login", s.handleLogin)
 	http.HandleFunc("/logout", s.handleLogout)
 	http.HandleFunc("/error", s.handleError)
-	http.HandleFunc("/registration", s.ensureCookieFlowID("registration", s.handleRegister))
-	http.HandleFunc("/verification", s.ensureCookieFlowID("verification", s.handleVerification))
-	http.HandleFunc("/registered", ensureCookieReferer(s.handleRegistered))
 	http.HandleFunc("/dashboard", s.handleDashboard)
-	http.HandleFunc("/verified", ensureCookieReferer(s.handleVerified))
-	http.HandleFunc("/recovery", s.ensureCookieFlowID("recovery", s.handleRecovery))
 	http.HandleFunc("/settings", s.ensureCookieFlowID("settings", s.handleSettings))
 
 	http.HandleFunc("/auth/consent", s.handleHydraConsent)
@@ -74,7 +83,7 @@ func main() {
 // handleLogin handles login request from hydra and kratos login flow
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
-	log.Info("got request")
+	log.Infof("got request time:%v", time.Now().UnixNano())
 
 	// get login challenge from url query parameters
 	challenge := r.URL.Query().Get("login_challenge")
@@ -91,13 +100,33 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 		state := base64.StdEncoding.EncodeToString(b)
 
+		response_type := r.URL.Query().Get("response_type")
+		prompt := r.URL.Query().Get("prompt")
+		//refresh_type := r.URL.Query().Get("refresh_type")
+		client_id := r.URL.Query().Get("client_id")
+		scope := r.URL.Query().Get("scope")
+		redirect_uri := r.URL.Query().Get("redirect_uri")
+
+		/*
+			params := url.Values{
+				//"response_type": []string{"code+token+id_token"},
+				"response_type": []string{response_type},
+				"prompt":        []string{"login"},
+				"refresh_type":  []string{"code"},
+				"client_id":     []string{"openaios-client-openid-03"},
+				"scope":         []string{"openid"},
+				"redirect_uri":  []string{"http://kratos.dev.openaios.4pd.io/iam-web/dashboard"},
+				"state":         []string{state},
+			}
+		*/
 		params := url.Values{
-			"response_type": []string{"code"},
-			"refresh_type":  []string{"code"},
-			"client_id":     []string{"openaios-client"},
-			"scope":         []string{"offline"},
-			"redirect_uri":  []string{"http://kratos.dev.openaios.4pd.io/iam-web/dashboard"},
-			"state":         []string{state},
+			"response_type": []string{response_type},
+			"prompt":        []string{prompt},
+			//"refresh_type":  []string{refresh_type},
+			"client_id":    []string{client_id},
+			"scope":        []string{scope},
+			"redirect_uri": []string{redirect_uri},
+			"state":        []string{state},
 		}
 		redirectTo := fmt.Sprintf("%s/oauth2/auth?", s.HydraPublicEndpoint) + params.Encode()
 		log.Infof("redirect to hydra, url: %s", redirectTo)
@@ -109,27 +138,40 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// get login request from hydra only if there is no flow id in the url query parameters
+	// check login challenge
+	// TODO: Is it redundant?
 	if flowID == "" {
-		//	s.HydraAPIClient
-		_, err := s.HydraAPIClient.Admin.GetLoginRequest(&hydra_admin.GetLoginRequestParams{
-			Context:        ctx,
-			LoginChallenge: challenge,
-		})
+		log.Infof("handler login flow id not found")
+
+		params := hydra_admin.NewGetLoginRequestParamsWithContext(ctx)
+
+		params.SetLoginChallenge(challenge)
+
+		log.Infof("start get login flow request")
+
+		_, err := s.HydraAdminClient.Admin.GetLoginRequest(params)
+
 		if err != nil {
-			log.Println(err)
+			log.Errorf("get login request failure,err:%v ", err.Error())
 			writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
 			return
 		}
+
+		log.Infof("end get login flow request")
 	}
 
+	log.Infof("parse cookie")
 	// get cookie from headers
 	cookie := r.Header.Get("cookie")
 
 	// check for kratos session details
+
+	log.Infof("get session from cookie")
 	session, _, err := s.KratosAPIClient.V0alpha2Api.ToSession(ctx).Cookie(cookie).Execute()
 
 	// if there is no session, redirect to login page with login challenge
 	if err != nil {
+		log.Errorf("get session from cookie failure, err:%v", err)
 		// build return_to url with hydra login challenge as url query parameter
 		returnToParams := url.Values{
 			"login_challenge": []string{challenge},
@@ -144,6 +186,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		redirectTo := fmt.Sprintf("%s/self-service/login/browser?", s.KratosPublicEndpoint) + redirectToParam.Encode()
 
+		log.Errorf("redirect to login browser, url:%s", redirectTo)
 		// get flowID from url query parameters
 		flowID := r.URL.Query().Get("flow")
 
@@ -158,6 +201,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// get the login flow
 		flow, _, err := s.KratosAPIClient.V0alpha2Api.GetSelfServiceLoginFlow(ctx).Id(flowID).Cookie(cookie).Execute()
 		if err != nil {
+			log.Errorf("get login flow error:%s", err.Error())
 			writeError(w, http.StatusUnauthorized, err)
 			return
 		}
@@ -165,10 +209,13 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			Title: "Login",
 			UI:    &flow.Ui,
 		}
+		log.Infof("render login template")
 		// render template index.html
 		templateData.Render(w)
 		return
 	}
+
+	log.Infof("login handler got session:%v", session)
 
 	// if there is a valid session, marshal session.identity.traits to json to be stored in subject
 	traitsJSON, err := json.Marshal(session.Identity.Traits)
@@ -178,21 +225,30 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	subject := string(traitsJSON)
 
+	loginAcceptParam := hydra_admin.NewAcceptLoginRequestParams()
+
+	loginAcceptParam.SetContext(ctx)
+	loginAcceptParam.SetLoginChallenge(challenge)
+
+	body := &hydra_models.AcceptLoginRequest{
+		Remember:    true,
+		RememberFor: 3600,
+		Subject:     &subject,
+	}
+
+	loginAcceptParam.SetBody(body)
+
 	// accept hydra login request
-	res, err := s.HydraAPIClient.Admin.AcceptLoginRequest(&hydra_admin.AcceptLoginRequestParams{
-		Context:        ctx,
-		LoginChallenge: challenge,
-		Body: &hydra_models.AcceptLoginRequest{
-			Remember:    true,
-			RememberFor: 3600,
-			Subject:     &subject,
-		},
-	})
+	res, err := s.HydraAdminClient.Admin.AcceptLoginRequest(loginAcceptParam)
+
 	if err != nil {
-		log.Println(err)
+		log.Errorf("accept login request failure,err:%v", err)
 		writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
 		return
 	}
+
+	log.Infof("login success, redirect to consent page: %s", *res.GetPayload().RedirectTo)
+
 	http.Redirect(w, r, *res.GetPayload().RedirectTo, http.StatusFound)
 }
 
@@ -217,90 +273,11 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // handleError handles login/registration error
 func (s *server) handleError(w http.ResponseWriter, r *http.Request) {
 	// get url query parameters
-	errorID := r.URL.Query().Get("id")
+	msg := r.URL.Query().Get("error")
 	// get error details
-	errorDetails, _, err := s.KratosAPIClient.V0alpha2Api.GetSelfServiceError(ctx).Id(errorID).Execute()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	// marshal errorDetails to json
-	errorDetailsJSON, err := json.MarshalIndent(errorDetails, "", "  ")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 	templateData := templateData{
 		Title:   "Error",
-		Details: string(errorDetailsJSON),
-	}
-	// render template index.html
-	templateData.Render(w)
-}
-
-// handleRegister handles kratos registration flow
-func (s *server) handleRegister(w http.ResponseWriter, r *http.Request, cookie, flowID string) {
-	// get the registration flow
-	flow, _, err := s.KratosAPIClient.V0alpha2Api.GetSelfServiceRegistrationFlow(ctx).Id(flowID).Cookie(cookie).Execute()
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err)
-		return
-	}
-	templateData := templateData{
-		Title: "Registration",
-		UI:    &flow.Ui,
-	}
-	// render template index.html
-	templateData.Render(w)
-}
-
-// handleVerification handles kratos verification flow
-func (s *server) handleVerification(w http.ResponseWriter, r *http.Request, cookie, flowID string) {
-	// get self-service verification flow for browser
-	flow, _, err := s.KratosAPIClient.V0alpha2Api.GetSelfServiceVerificationFlow(ctx).Id(flowID).Cookie(cookie).Execute()
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err)
-		return
-	}
-
-	templateData := templateData{
-		Title: "Verify your Email address",
-		UI:    &flow.Ui,
-	}
-	// render template index.html
-	templateData.Render(w)
-}
-
-// handleRegistered displays registration complete message to user
-func (s *server) handleRegistered(w http.ResponseWriter, r *http.Request) {
-	templateData := templateData{
-		Title: "Registration Complete",
-	}
-	// render template index.html
-	templateData.Render(w)
-}
-
-// handleVerified displays verfification complete message to user
-func (s *server) handleVerified(w http.ResponseWriter, r *http.Request) {
-	templateData := templateData{
-		Title: "Verification Complete",
-	}
-	// render template index.html
-	templateData.Render(w)
-}
-
-// handleRecovery handles kratos recovery flow
-func (s *server) handleRecovery(w http.ResponseWriter, r *http.Request, cookie, flowID string) {
-	// get self-service recovery flow for browser
-	flow, _, err := s.KratosAPIClient.V0alpha2Api.GetSelfServiceRecoveryFlow(ctx).Id(flowID).Cookie(cookie).Execute()
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err)
-		return
-	}
-
-	templateData := templateData{
-		Title: "Password Recovery Form",
-		UI:    &flow.Ui,
+		Details: msg,
 	}
 	// render template index.html
 	templateData.Render(w)
@@ -325,17 +302,67 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request, cookie, 
 
 // handleDashboard shows dashboard
 func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	// get cookie from headers
-	cookie := r.Header.Get("cookie")
-	// get session details
-	session, _, err := s.KratosAPIClient.V0alpha2Api.ToSession(ctx).Cookie(cookie).Execute()
-	if err != nil {
-		http.Redirect(w, r, "/iam-web/login", http.StatusFound)
-		return
+
+	response := map[string]interface{}{}
+
+	{
+		// get cookie from headers
+		cookie := r.Header.Get("cookie")
+		// get session details
+		session, _, err := s.KratosAPIClient.V0alpha2Api.ToSession(ctx).Cookie(cookie).Execute()
+		if err != nil {
+			http.Redirect(w, r, "/iam-web/login", http.StatusFound)
+			return
+		}
+		response["session"] = session
+	}
+
+	{
+		code := r.URL.Query().Get("code")
+		response["code"] = code
+
+		params := &public.Oauth2TokenParams{}
+
+		clientID := "openaios-client-openid-04"
+		redirectURI := "http://kratos.dev.openaios.4pd.io/iam-web/dashboard"
+
+		params.SetClientID(&clientID)
+		params.SetCode(&code)
+		params.WithContext(ctx)
+		params.SetGrantType("authorization_code")
+		params.SetRedirectURI(&redirectURI)
+
+		log.Infof("request hydra for token, request params: %+v", params)
+		log.Infof("request hydra for token, request params.code: %+v", *params.Code)
+		log.Infof("request hydra for token, request params.redirect: %+v", *params.RedirectURI)
+		log.Infof("request hydra for token, request params.grant_type: %+v", params.GrantType)
+		log.Infof("request hydra for token, request params.clientID: %+v", *params.ClientID)
+
+		//s.HydraAPIClient.SetTransport(transport runtime.ClientTransport)
+
+		//info := openapiclient.BasicAuth("client_secret", "openaios-client-secret")
+		info := openapiclient.BasicAuth("openaios-client-openid-04", "openaios-client-secret")
+
+		//info := httptransport.BasicAuth(clientID, "openaios-client-secret")
+		//info := openapiclient.APIKeyAuth("client_secret", "query", "openaios-client-secret")
+
+		res, err := s.HydraPublicClient.Public.Oauth2Token(params, info)
+		if err != nil {
+			log.Errorf("request hydra for token failure,err:%v", err)
+			response["oauth2token_error"] = err.Error()
+		} else {
+			response["Oauth2Token"] = res
+		}
+
+	}
+
+	{
+		errMsg := r.URL.Query().Get("error_description")
+		response["error_description"] = errMsg
 	}
 
 	// marshal session to json
-	sessionJSON, err := json.MarshalIndent(session, "", "  ")
+	sessionJSON, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -360,65 +387,51 @@ func (s *server) handleHydraConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	consentGetParams := hydra_admin.NewGetConsentRequestParams()
+	consentGetParams.WithContext(ctx)
+	consentGetParams.SetConsentChallenge(challenge)
+
 	// get consent request
-	getConsentRes, err := s.HydraAPIClient.Admin.GetConsentRequest(&hydra_admin.GetConsentRequestParams{
-		Context:          ctx,
-		ConsentChallenge: challenge,
-	})
+	getConsentRes, err := s.HydraAdminClient.Admin.GetConsentRequest(consentGetParams)
+
 	if err != nil {
 		log.Println(err)
 		writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
 		return
 	}
 
-	// get cookie from headers
-	cookie := r.Header.Get("cookie")
-	// get session details
-	session, _, err := s.KratosAPIClient.V0alpha2Api.ToSession(ctx).Cookie(cookie).Execute()
-	if err != nil {
-		log.Println(err)
-		writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
-		return
-	}
+	skip := getConsentRes.GetPayload().Skip
+	log.Infof("consent page get consent request by consent challenge,skip:%v", skip)
 
-	log.Infof("handle hydra consent request, session:%v", session)
-	log.Infof("handle hydra consent request, session.Identity:%v", session.Identity)
+	// demo stage, so skip always is true
+	skip = true
+	if skip {
 
-	var name string
-
-	if trait, ok := session.Identity.Traits.(map[string]interface{}); ok {
-		if s, ok := trait["username"].(string); ok {
-			name = s
+		log.Infof("consent request scope value: %v", getConsentRes.GetPayload().RequestedScope)
+		// Now it's time to grant the consent request.
+		// You could also deny the request if something went terribly wrong
+		consentAcceptBody := &hydra_models.AcceptConsentRequest{
+			GrantAccessTokenAudience: getConsentRes.GetPayload().RequestedAccessTokenAudience,
+			GrantScope:               getConsentRes.GetPayload().RequestedScope,
 		}
+
+		consentAcceptParams := hydra_admin.NewAcceptConsentRequestParams()
+		consentAcceptParams.WithContext(ctx)
+		consentAcceptParams.SetConsentChallenge(challenge)
+		consentAcceptParams.WithBody(consentAcceptBody)
+
+		consentAcceptResp, err := s.HydraAdminClient.Admin.AcceptConsentRequest(consentAcceptParams)
+
+		if err != nil {
+			log.Errorf("accept consent failure, err:%v", err)
+			writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
+		}
+
+		log.Infof("process consent success, redirect to:%s", *consentAcceptResp.GetPayload().RedirectTo)
+
+		http.Redirect(w, r, *consentAcceptResp.GetPayload().RedirectTo, http.StatusFound)
 	}
 
-	// accept consent request and add verifiable address to id_token in session
-	acceptConsentRes, err := s.HydraAPIClient.Admin.AcceptConsentRequest(&hydra_admin.AcceptConsentRequestParams{
-		Context:          ctx,
-		ConsentChallenge: challenge,
-		Body: &hydra_models.AcceptConsentRequest{
-			GrantScope:  getConsentRes.Payload.RequestedScope,
-			Remember:    true,
-			RememberFor: 3600,
-			Session: &hydra_models.ConsentRequestSession{
-				IDToken: service.PersonSchemaJsonTraits{Name: &service.PersonSchemaJsonTraitsName{First: &name}},
-			},
-		},
-	})
-
-	if err != nil {
-		log.Errorf("accept consent request failure, err:%v", err)
-		writeError(w, http.StatusUnauthorized, errors.New("Unauthorized OAuth Client"))
-		return
-	}
-
-	log.Infof("accept consent request success, user:%s", name)
-
-	log.Infof("accept consent request and redirect to dashboard")
-
-	log.Infof("accept consent request,accept res:%v", acceptConsentRes)
-
-	http.Redirect(w, r, "/iam-web/dashboard", http.StatusFound)
 }
 
 func NewServer(kratosPublicEndpointPort, hydraPublicEndpointPort int) (*server, error) {
@@ -434,11 +447,17 @@ func NewServer(kratosPublicEndpointPort, hydraPublicEndpointPort int) (*server, 
 	return &server{
 		KratosAPIClient:      kratos.NewAPIClient(conf),
 		KratosPublicEndpoint: "http://kratos.dev.openaios.4pd.io",
-		HydraAPIClient: hydra.NewHTTPClientWithConfig(strfmt.Default, &hydra.TransportConfig{
+		HydraAdminClient: hydra.NewHTTPClientWithConfig(strfmt.Default, &hydra.TransportConfig{
 			BasePath: "/",
 			Host:     "admin.hydra.dev.openaios.4pd.io",
 			Schemes:  []string{"http"},
 		}),
+		HydraPublicClient: hydra.NewHTTPClientWithConfig(strfmt.Default, &hydra.TransportConfig{
+			BasePath: "/",
+			Host:     "hydra.dev.openaios.4pd.io",
+			Schemes:  []string{"http"},
+		}),
+
 		HydraPublicEndpoint: "http://hydra.dev.openaios.4pd.io",
 		Port:                ":80",
 	}, nil

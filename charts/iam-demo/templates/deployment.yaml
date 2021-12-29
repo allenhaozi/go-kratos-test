@@ -31,11 +31,15 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.args | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
           - name: DEBUG
-            value: "true"
+            value: "false"
+          - name: ARGS
+            value: {{ .Values.args }}
+          - name: RANDOM
+            value: "{{- randAlphaNum 24 | nospace -}}"
           ports:
             - name: http
               containerPort: 8000
